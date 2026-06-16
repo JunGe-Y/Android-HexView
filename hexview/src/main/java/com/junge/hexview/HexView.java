@@ -27,6 +27,7 @@ import android.widget.Toast;
 
 
 import java.io.File;
+import java.lang.ref.WeakReference;
 
 import com.junge.hexview.R;
 import java.util.Locale;
@@ -43,6 +44,7 @@ public class HexView extends View implements HexDataController.Callback {
     private static final int SCROLLER_COORDINATE_LIMIT = 1_000_000_000;
     private static final String[] HEX_STRINGS = new String[256];
     private static final String[] ASCII_STRINGS = new String[256];
+    private static WeakReference<HexView> activeHexViewRef = new WeakReference<>(null);
 
     static {
         for (int i = 0; i < 256; i++) {
@@ -286,7 +288,20 @@ public class HexView extends View implements HexDataController.Callback {
     }
 
     @Override
+    protected void onFocusChanged(boolean gainFocus, int direction, android.graphics.Rect previouslyFocusedRect) {
+        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect);
+        if (gainFocus) {
+            activateAsOnlyFocusedHexView();
+        } else if (getActiveHexView() == this) {
+            clearActiveHexView(this);
+        }
+    }
+
+    @Override
     public boolean onTouchEvent(MotionEvent event) {
+        if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
+            activateAsOnlyFocusedHexView();
+        }
         velocityTracker.addMovement(event);
 
         if (draggingStartHandle || draggingEndHandle) {
@@ -368,10 +383,53 @@ public class HexView extends View implements HexDataController.Callback {
     @Override
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
+        if (getActiveHexView() == this) {
+            clearActiveHexView(this);
+        }
         dismissCopyPopup();
         removeCallbacks(caretBlinkRunnable);
         velocityTracker.recycle();
         dataController.shutdown();
+    }
+
+    private void activateAsOnlyFocusedHexView() {
+        HexView previousActiveView = getActiveHexView();
+        if (previousActiveView == this) {
+            if (!hasFocus()) {
+                requestFocus();
+            }
+            return;
+        }
+        if (previousActiveView != null) {
+            previousActiveView.clearInteractiveState();
+        }
+        activeHexViewRef = new WeakReference<>(this);
+        if (!hasFocus()) {
+            requestFocus();
+        }
+    }
+
+    private void clearInteractiveState() {
+        selectionController.clear();
+        draggingStartHandle = false;
+        draggingEndHandle = false;
+        draggingScroll = false;
+        draggingScrollbar = false;
+        caretVisible = false;
+        dismissCopyPopup();
+        removeCallbacks(caretBlinkRunnable);
+        scroller.forceFinished(true);
+        invalidate();
+    }
+
+    private static HexView getActiveHexView() {
+        return activeHexViewRef.get();
+    }
+
+    private static void clearActiveHexView(HexView view) {
+        if (activeHexViewRef.get() == view) {
+            activeHexViewRef.clear();
+        }
     }
 
     private void drawRows(Canvas canvas) {
