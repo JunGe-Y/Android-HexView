@@ -10,7 +10,9 @@ import android.graphics.RectF;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.AttributeSet;
+import android.util.Log;
 import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.LayoutInflater;
@@ -35,13 +37,15 @@ import java.util.Locale;
 public class HexView extends View implements HexDataController.Callback {
 
     private static final int DEFAULT_BYTES_PER_ROW = 8;
-    private static final int DEFAULT_WINDOW_BYTES = 10 * 1024;
+    private static final int DEFAULT_WINDOW_BYTES = 2 * 1024;
     private static final long CARET_BLINK_MS = 500L;
     private static final int VIEWPORT_BUCKET_ROWS = 64;
     private static final int SCROLLBAR_GUTTER_DP = 12;
     private static final int SCROLLBAR_TOUCH_WIDTH_DP = 28;
     private static final int SCROLLBAR_THUMB_MIN_DP = 32;
     private static final int SCROLLER_COORDINATE_LIMIT = 1_000_000_000;
+    private static final String PERF_TAG = "HexViewPerf";
+    private static final long PERF_LOG_THRESHOLD_MS = 4L;
     private static final String[] HEX_STRINGS = new String[256];
     private static final String[] ASCII_STRINGS = new String[256];
     private static WeakReference<HexView> activeHexViewRef = new WeakReference<>(null);
@@ -101,6 +105,24 @@ public class HexView extends View implements HexDataController.Callback {
     private boolean draggingScrollbar;
     private boolean caretVisible = true;
     private PopupWindow copyPopup;
+    private HexSource pendingSource;
+
+    private final Runnable applyPendingSourceRunnable = new Runnable() {
+        @Override
+        public void run() {
+            long startTime = SystemClock.uptimeMillis();
+            HexSource sourceToApply = pendingSource;
+            pendingSource = null;
+            if (sourceToApply == null) {
+                return;
+            }
+            dataController.setSource(sourceToApply);
+            logPerf("applyPendingSource", startTime,
+                    "sourceSize=" + safeSourceSize(sourceToApply)
+                            + ", total=" + cachedTotalByteSize
+                            + ", attached=" + isAttachedToWindow());
+        }
+    };
 
     private enum HandleHit {
         NONE, START, END
@@ -201,6 +223,7 @@ public class HexView extends View implements HexDataController.Callback {
 
     @Override
     public void onDataChanged(HexRenderModel model) {
+        long startTime = SystemClock.uptimeMillis();
         int previousTotalSize = cachedTotalByteSize;
         cachedTotalByteSize = Math.max(model.totalSize, dataController.getSourceSize());
         int newOffsetWidth = Math.max(4, Integer.toHexString(Math.max(0, cachedTotalByteSize)).length());
@@ -219,25 +242,33 @@ public class HexView extends View implements HexDataController.Callback {
             requestWindowForViewport();
             invalidate();
         }
+        logPerf("onDataChanged", startTime,
+                "rows=" + model.rows.size()
+                        + ", modelStart=" + model.startOffset
+                        + ", modelEnd=" + model.getWindowEndOffset()
+                        + ", total=" + cachedTotalByteSize
+                        + ", needsLayout=" + needsLayout);
     }
 
     public void setSource(HexSource source) {
-        dataController.setSource(source);
+        setSourceDeferred(source);
     }
 
     public void setBytes(byte[] bytes) {
-        dataController.setSource(new InMemoryHexSource(bytes));
+        setSourceDeferred(new InMemoryHexSource(bytes));
     }
 
     public void setFile(File file) {
-        dataController.setSource(new FileHexSource(file));
+        setSourceDeferred(new FileHexSource(file));
     }
 
     public void setUri(Uri uri) {
-        dataController.setSource(new UriHexSource(getContext(), uri));
+        setSourceDeferred(new UriHexSource(getContext(), uri));
     }
 
     public void clear() {
+        pendingSource = null;
+        removeCallbacks(applyPendingSourceRunnable);
         dataController.clear();
         selectionController.clear();
         cachedTotalByteSize = 0;
@@ -249,6 +280,37 @@ public class HexView extends View implements HexDataController.Callback {
         this.bytesPerRow = Math.max(1, bytesPerRow);
         dataController.setBytesPerRow(this.bytesPerRow);
         requestLayout();
+    }
+
+    private void setSourceDeferred(HexSource source) {
+        long startTime = SystemClock.uptimeMillis();
+        pendingSource = source;
+        resetForPendingSource();
+        removeCallbacks(applyPendingSourceRunnable);
+        post(applyPendingSourceRunnable);
+        logPerf("setSourceDeferred", startTime,
+                "sourceSize=" + safeSourceSize(source)
+                        + ", total=" + cachedTotalByteSize
+                        + ", attached=" + isAttachedToWindow());
+    }
+
+    private void resetForPendingSource() {
+        long startTime = SystemClock.uptimeMillis();
+        dataController.cancelPendingLoads();
+        model = HexRenderModel.empty();
+        selectionController.clear();
+        cachedTotalByteSize = pendingSource != null ? Math.max(0, pendingSource.size()) : 0;
+        scrollYPosition = 0;
+        lastViewportBucketStart = -1;
+        lastViewportBucketEnd = -1;
+        offsetWidthChars = Math.max(4, Integer.toHexString(Math.max(0, cachedTotalByteSize)).length());
+        dismissCopyPopup();
+        removeCallbacks(caretBlinkRunnable);
+        requestLayout();
+        invalidate();
+        logPerf("resetForPendingSource", startTime,
+                "total=" + cachedTotalByteSize
+                        + ", rowCount=" + getTotalRowCount());
     }
 
     public long getSelectionStart() {
@@ -265,6 +327,7 @@ public class HexView extends View implements HexDataController.Callback {
 
     @Override
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        long startTime = SystemClock.uptimeMillis();
         int width = MeasureSpec.getSize(widthMeasureSpec);
         updateMetrics(width);
         int desiredHeight = (int) Math.ceil(Math.min(contentHeight + getPaddingTop() + getPaddingBottom(), dp(320)));
@@ -272,12 +335,21 @@ public class HexView extends View implements HexDataController.Callback {
         maxScrollY = Math.max(0, contentHeight - (getMeasuredHeight() - getPaddingTop() - getPaddingBottom()));
         scrollYPosition = Math.min(scrollYPosition, maxScrollY);
         requestWindowForViewport();
+        logPerf("onMeasure", startTime,
+                "width=" + width
+                        + ", measured=" + getMeasuredWidth() + "x" + getMeasuredHeight()
+                        + ", total=" + cachedTotalByteSize
+                        + ", rows=" + getTotalRowCount()
+                        + ", contentHeight=" + (long) contentHeight
+                        + ", maxScrollY=" + (long) maxScrollY);
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
+        long startTime = SystemClock.uptimeMillis();
         super.onDraw(canvas);
         if (model.rows.isEmpty() && cachedTotalByteSize <= 0) {
+            logPerf("onDrawEmpty", startTime, "total=" + cachedTotalByteSize);
             return;
         }
         int save = canvas.save();
@@ -285,6 +357,11 @@ public class HexView extends View implements HexDataController.Callback {
         canvas.restoreToCount(save);
         drawSelectionHandles(canvas);
         drawScrollbar(canvas);
+        logPerf("onDraw", startTime,
+                "visibleRows=" + computeFirstVisibleRow() + ".." + computeLastVisibleRow(getHeight())
+                        + ", modelRows=" + model.rows.size()
+                        + ", total=" + cachedTotalByteSize
+                        + ", scrollY=" + (long) scrollYPosition);
     }
 
     @Override
@@ -321,12 +398,14 @@ public class HexView extends View implements HexDataController.Callback {
                 draggingScroll = false;
                 dismissCopyPopup();
                 if (hitTestScrollbar(event.getX(), event.getY())) {
+                    getParent().requestDisallowInterceptTouchEvent(true);
                     draggingScrollbar = true;
                     scrollToScrollbarY(event.getY());
                     return true;
                 }
                 HandleHit handleHit = hitTestHandle(event.getX(), event.getY());
                 if (handleHit != HandleHit.NONE) {
+                    getParent().requestDisallowInterceptTouchEvent(true);
                     draggingStartHandle = handleHit == HandleHit.START;
                     draggingEndHandle = handleHit == HandleHit.END;
                     removeCallbacks(caretBlinkRunnable);
@@ -341,6 +420,7 @@ public class HexView extends View implements HexDataController.Callback {
                 gestureDetector.onTouchEvent(event);
                 if (draggingScrollbar) {
                     draggingScrollbar = false;
+                    getParent().requestDisallowInterceptTouchEvent(false);
                     velocityTracker.clear();
                     return true;
                 }
@@ -359,6 +439,7 @@ public class HexView extends View implements HexDataController.Callback {
                 draggingEndHandle = false;
                 draggingScroll = false;
                 draggingScrollbar = false;
+                getParent().requestDisallowInterceptTouchEvent(false);
                 velocityTracker.clear();
                 return true;
             default:
@@ -390,7 +471,6 @@ public class HexView extends View implements HexDataController.Callback {
         dismissCopyPopup();
         removeCallbacks(caretBlinkRunnable);
         releaseVelocityTracker();
-        dataController.shutdown();
     }
 
     @Override
@@ -453,6 +533,8 @@ public class HexView extends View implements HexDataController.Callback {
     }
 
     private void drawRows(Canvas canvas) {
+        long startTime = SystemClock.uptimeMillis();
+        int drawnRows = 0;
         int paddingLeft = getPaddingLeft();
         int paddingTop = getPaddingTop();
         int paddingBottom = getPaddingBottom();
@@ -481,6 +563,7 @@ public class HexView extends View implements HexDataController.Callback {
                 continue;
             }
             HexRow row = model.rows.get(modelRowIndex);
+            drawnRows++;
 
             for (int i = 0; i < bytesPerRow; i++) {
                 long byteOffset = row.offset + i;
@@ -507,6 +590,11 @@ public class HexView extends View implements HexDataController.Callback {
             canvas.drawLine(hexColumnLeft - columnGap, lineTop, hexColumnLeft - columnGap, lineBottom, linePaint);
             canvas.drawLine(asciiColumnLeft - columnGap, lineTop, asciiColumnLeft - columnGap, lineBottom, linePaint);
         }
+        logPerf("drawRows", startTime,
+                "drawnRows=" + drawnRows
+                        + ", visible=" + firstVisibleRow + ".." + lastVisibleRow
+                        + ", modelRows=" + model.rows.size()
+                        + ", selected=" + selectionController.isHandlesVisible());
     }
 
     private int computeFirstVisibleRow() {
@@ -613,6 +701,7 @@ public class HexView extends View implements HexDataController.Callback {
                 HandleHit releasedHandle = draggingStartHandle ? HandleHit.START : HandleHit.END;
                 draggingStartHandle = false;
                 draggingEndHandle = false;
+                getParent().requestDisallowInterceptTouchEvent(false);
                 velocityTracker.clear();
                 if (selectionController.isHandlesVisible()) {
                     showOrUpdateCopyMenu(releasedHandle);
@@ -633,7 +722,7 @@ public class HexView extends View implements HexDataController.Callback {
         if (start < 0 || end < 0) {
             return HandleHit.NONE;
         }
-        float touchRadius = getHandleRadius() + dp(6);
+        float touchRadius = getHandleRadius() + dp(20);
         float startCx = getHandleCenterX(start, true);
         float startCy = getHandleCenterY(start);
         float endCx = getHandleCenterX(end, false);
@@ -752,18 +841,17 @@ public class HexView extends View implements HexDataController.Callback {
         if (rowIndex >= getTotalRowCount()) {
             return -1;
         }
-        int modelRowIndex = getModelRowIndex(rowIndex);
-        if (modelRowIndex < 0) {
-            return -1;
-        }
-        HexRow row = model.rows.get(modelRowIndex);
         float localX = x;
         int hexIndex = (int) ((localX - hexColumnLeft) / Math.max(1f, hexCellWidth));
         int asciiIndex = (int) ((localX - asciiColumnLeft) / Math.max(1f, asciiCellWidth));
         int index = localX < asciiColumnLeft ? hexIndex : asciiIndex;
         if (index < 0) index = 0;
-        if (index >= row.length) index = row.length - 1;
-        return row.offset + index;
+        if (index >= bytesPerRow) index = bytesPerRow - 1;
+        long offset = (long) rowIndex * bytesPerRow + index;
+        if (offset >= cachedTotalByteSize) {
+            offset = cachedTotalByteSize - 1L;
+        }
+        return offset >= 0 ? offset : -1;
     }
 
     private void scrollByInternal(float dy) {
@@ -850,10 +938,15 @@ public class HexView extends View implements HexDataController.Callback {
     }
 
     private void requestWindowForViewport() {
+        long startTime = SystemClock.uptimeMillis();
         if (rowHeight <= 0 || bytesPerRow <= 0) {
+            logPerf("requestWindowForViewportSkip", startTime,
+                    "reason=rowHeightOrBytesPerRowInvalid");
             return;
         }
         if (cachedTotalByteSize <= 0) {
+            logPerf("requestWindowForViewportSkip", startTime,
+                    "reason=emptySource");
             return;
         }
         int totalByteSize = cachedTotalByteSize;
@@ -865,11 +958,18 @@ public class HexView extends View implements HexDataController.Callback {
         int bucketEnd = lastVisibleRow / VIEWPORT_BUCKET_ROWS;
         boolean bucketUnchanged = bucketStart == lastViewportBucketStart && bucketEnd == lastViewportBucketEnd;
         if (bucketUnchanged && modelCoversRange(visibleStartOffset, visibleEndOffset)) {
+            logPerf("requestWindowForViewportSkip", startTime,
+                    "reason=covered, visible=" + visibleStartOffset + ".." + visibleEndOffset
+                            + ", bucket=" + bucketStart + ".." + bucketEnd);
             return;
         }
         lastViewportBucketStart = bucketStart;
         lastViewportBucketEnd = bucketEnd;
         dataController.onViewportChanged(visibleStartOffset, visibleEndOffset);
+        logPerf("requestWindowForViewport", startTime,
+                "visible=" + visibleStartOffset + ".." + visibleEndOffset
+                        + ", bucket=" + bucketStart + ".." + bucketEnd
+                        + ", total=" + totalByteSize);
     }
 
     private boolean modelCoversRange(int startOffset, int endOffset) {
@@ -1158,6 +1258,27 @@ public class HexView extends View implements HexDataController.Callback {
         }
         clipboardManager.setPrimaryClip(ClipData.newPlainText("hex", text));
         Toast.makeText(getContext(), R.string.hexview_copied, Toast.LENGTH_SHORT).show();
+    }
+
+    private void logPerf(String stage, long startTime, String detail) {
+        long cost = SystemClock.uptimeMillis() - startTime;
+        if (cost >= PERF_LOG_THRESHOLD_MS) {
+            Log.d(PERF_TAG,
+                    stage + " cost=" + cost + "ms"
+                            + ", view=" + Integer.toHexString(System.identityHashCode(this))
+                            + ", thread=" + Thread.currentThread().getName()
+                            + ", " + detail);
+        }
+    }
+
+    private int safeSourceSize(HexSource source) {
+        if (source == null) {
+            return 0;
+        }
+        long startTime = SystemClock.uptimeMillis();
+        int size = source.size();
+        logPerf("source.size", startTime, "size=" + size);
+        return size;
     }
 
     private double clamp(double value, double min, double max) {

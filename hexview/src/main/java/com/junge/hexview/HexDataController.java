@@ -1,6 +1,8 @@
 package com.junge.hexview;
 
 import android.os.Handler;
+import android.os.SystemClock;
+import android.util.Log;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -14,6 +16,9 @@ final class HexDataController {
 
     private final Handler mainHandler;
     private final Callback callback;
+    private static final String PERF_TAG = "HexViewPerf";
+    private static final long PERF_LOG_THRESHOLD_MS = 2L;
+
     private final int defaultWindowBytes;
     private final int prefetchWindowBytes;
     private final HexWindowCache cache = new HexWindowCache();
@@ -36,7 +41,7 @@ final class HexDataController {
         this.callback = callback;
         this.bytesPerRow = Math.max(1, bytesPerRow);
         this.defaultWindowBytes = Math.max(this.bytesPerRow, defaultWindowBytes);
-        this.prefetchWindowBytes = Math.max(this.bytesPerRow * 64, this.defaultWindowBytes / 2);
+        this.prefetchWindowBytes = Math.max(this.bytesPerRow * 16, this.defaultWindowBytes / 2);
     }
 
     int getBytesPerRow() {
@@ -83,17 +88,26 @@ final class HexDataController {
     }
 
     void setSource(HexSource source) {
+        long startTime = SystemClock.uptimeMillis();
+        long sizeStartTime = SystemClock.uptimeMillis();
+        int newSourceSize = source.size();
+        long sizeCost = SystemClock.uptimeMillis() - sizeStartTime;
         synchronized (lock) {
             ensureExecutorLocked();
             closeSourceLocked();
             this.source = source;
-            this.sourceSize = source.size();
+            this.sourceSize = newSourceSize;
             generation++;
             windowStart = windowEnd = -1;
             multiWindowEnabled = sourceSize > defaultWindowBytes;
             cache.clear();
         }
         reload();
+        logPerf("controller.setSource", startTime,
+                "sourceSize=" + newSourceSize
+                        + ", sizeCost=" + sizeCost
+                        + ", multiWindow=" + multiWindowEnabled
+                        + ", defaultWindow=" + defaultWindowBytes);
     }
 
     void clear() {
@@ -111,6 +125,7 @@ final class HexDataController {
     }
 
     void onViewportChanged(int visibleStartOffset, int visibleEndOffset) {
+        long startTime = SystemClock.uptimeMillis();
         HexSource currentSource;
         int currentGeneration;
         int currentBytesPerRow;
@@ -155,10 +170,29 @@ final class HexDataController {
                 windowEnd = cached.getWindowEndOffset();
             }
             callback.onDataChanged(cached);
+            logPerf("controller.onViewportChangedCached", startTime,
+                    "visible=" + visibleStartOffset + ".." + visibleEndOffset
+                            + ", request=" + requestStart + ".." + requestEnd
+                            + ", sourceSize=" + currentSourceSize
+                            + ", requestId=" + requestId);
             return;
         }
 
         loadWindow(currentSource, currentGeneration, requestStart, requestEnd, currentBytesPerRow, currentSourceSize, requestId);
+        logPerf("controller.onViewportChangedLoad", startTime,
+                "visible=" + visibleStartOffset + ".." + visibleEndOffset
+                        + ", request=" + requestStart + ".." + requestEnd
+                        + ", sourceSize=" + currentSourceSize
+                        + ", requestId=" + requestId);
+    }
+
+    void cancelPendingLoads() {
+        synchronized (lock) {
+            generation++;
+            viewportRequestId++;
+            windowStart = windowEnd = -1;
+            cache.clear();
+        }
     }
 
     void shutdown() {
@@ -176,6 +210,7 @@ final class HexDataController {
     }
 
     private void reload() {
+        long startTime = SystemClock.uptimeMillis();
         HexSource currentSource;
         int currentGeneration;
         int currentBytesPerRow;
@@ -196,9 +231,14 @@ final class HexDataController {
             requestId = viewportRequestId;
         }
         loadWindow(currentSource, currentGeneration, 0, Math.min(currentSourceSize, defaultWindowBytes), currentBytesPerRow, currentSourceSize, requestId);
+        logPerf("controller.reload", startTime,
+                "sourceSize=" + currentSourceSize
+                        + ", bytesPerRow=" + currentBytesPerRow
+                        + ", requestId=" + requestId);
     }
 
     private void loadWindow(HexSource source, int requestGeneration, int start, int end, int requestBytesPerRow, int totalSize, int requestId) {
+        long startTime = SystemClock.uptimeMillis();
         if (start >= end) {
             return;
         }
@@ -214,31 +254,70 @@ final class HexDataController {
         }
         try {
             executor.execute(() -> {
+                long workerStartTime = SystemClock.uptimeMillis();
+                long cacheStartTime = SystemClock.uptimeMillis();
                 HexRenderModel cached = cache.getCovering(loadStart, loadEnd);
+                long cacheCost = SystemClock.uptimeMillis() - cacheStartTime;
                 HexRenderModel loadedModel;
+                long readCost = 0L;
+                long modelCost = 0L;
                 if (cached != null) {
                     loadedModel = cached;
                 } else {
+                    long readStartTime = SystemClock.uptimeMillis();
                     byte[] data = source.read(loadStart, loadEnd - loadStart);
+                    readCost = SystemClock.uptimeMillis() - readStartTime;
                     if (data.length == 0 && loadStart < totalSize) {
                         return;
                     }
+                    long modelStartTime = SystemClock.uptimeMillis();
                     loadedModel = HexRenderModel.from(loadStart, data, totalSize, requestBytesPerRow);
+                    modelCost = SystemClock.uptimeMillis() - modelStartTime;
                     cache.put(loadedModel);
                 }
                 HexRenderModel modelToPublish = loadedModel;
+                logPerf("controller.loadWindowWorker", workerStartTime,
+                        "request=" + loadStart + ".." + loadEnd
+                                + ", bytes=" + (loadEnd - loadStart)
+                                + ", total=" + totalSize
+                                + ", cached=" + (cached != null)
+                                + ", cacheCost=" + cacheCost
+                                + ", readCost=" + readCost
+                                + ", modelCost=" + modelCost
+                                + ", rows=" + modelToPublish.rows.size()
+                                + ", requestId=" + requestId);
+                long postStartTime = SystemClock.uptimeMillis();
                 mainHandler.post(() -> {
+                    long publishStartTime = SystemClock.uptimeMillis();
                     synchronized (lock) {
                         if (shutdown || generation != requestGeneration || requestId != viewportRequestId) {
+                            logPerf("controller.publishSkipped", publishStartTime,
+                                    "requestId=" + requestId
+                                            + ", generation=" + generation
+                                            + ", requestGeneration=" + requestGeneration
+                                            + ", shutdown=" + shutdown);
                             return;
                         }
                         windowStart = modelToPublish.startOffset;
                         windowEnd = modelToPublish.getWindowEndOffset();
                     }
                     callback.onDataChanged(modelToPublish);
+                    logPerf("controller.publish", publishStartTime,
+                            "request=" + modelToPublish.startOffset + ".." + modelToPublish.getWindowEndOffset()
+                                    + ", rows=" + modelToPublish.rows.size()
+                                    + ", requestId=" + requestId
+                                    + ", postDelay=" + (publishStartTime - postStartTime));
                 });
             });
+            logPerf("controller.loadWindowSubmit", startTime,
+                    "request=" + loadStart + ".." + loadEnd
+                            + ", bytes=" + (loadEnd - loadStart)
+                            + ", total=" + totalSize
+                            + ", requestId=" + requestId);
         } catch (RejectedExecutionException ignored) {
+            logPerf("controller.loadWindowRejected", startTime,
+                    "request=" + loadStart + ".." + loadEnd
+                            + ", requestId=" + requestId);
         }
     }
 
@@ -259,6 +338,17 @@ final class HexDataController {
         }
         source = null;
         sourceSize = 0;
+    }
+
+    private void logPerf(String stage, long startTime, String detail) {
+        long cost = SystemClock.uptimeMillis() - startTime;
+        if (cost >= PERF_LOG_THRESHOLD_MS) {
+            Log.d(PERF_TAG,
+                    stage + " cost=" + cost + "ms"
+                            + ", controller=" + Integer.toHexString(System.identityHashCode(this))
+                            + ", thread=" + Thread.currentThread().getName()
+                            + ", " + detail);
+        }
     }
 
     private int alignDown(int value, int alignment) {
