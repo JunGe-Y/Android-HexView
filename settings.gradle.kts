@@ -20,5 +20,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Android-Hexview"
+rootProject.name = "Android-HexView"
 include(":hexview", ":app")
