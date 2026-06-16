@@ -1,0 +1,6 @@
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="toolbar_background">#FF1F6FEB</color>
+    <color name="toolbar_content">#FFFFFFFF</color>
+</resources>

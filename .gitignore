@@ -1,0 +1,10 @@
+# Project exclude paths
+/.gradle/
+/build/
+/local.properties
+
+/app/build/
+/app/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes/
+
+/hexview/build/
+/hexview/build/intermediates/javac/debug/compileDebugJavaWithJavac/classes/

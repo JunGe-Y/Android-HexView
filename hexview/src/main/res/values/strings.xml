@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="hexview_copy_hex">复制Hex</string>
+    <string name="hexview_copy_string">复制文本</string>
+    <string name="hexview_copied">已复制</string>
+</resources>

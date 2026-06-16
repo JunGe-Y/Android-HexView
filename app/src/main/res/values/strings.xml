@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Android HexView Demo</string>
+    <string name="open_file">Open file</string>
+    <string name="no_file_selected">No file selected</string>
+    <string name="tap_plus_to_open_file">Tap the + button in the top right to choose a file.</string>
+    <string name="empty_file">This file is empty.</string>
+    <string name="open_file_failed">Failed to open file.</string>
+</resources>
