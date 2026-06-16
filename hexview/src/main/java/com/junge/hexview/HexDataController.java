@@ -4,6 +4,7 @@ import android.os.Handler;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 final class HexDataController {
 
@@ -16,9 +17,9 @@ final class HexDataController {
     private final int defaultWindowBytes;
     private final int prefetchWindowBytes;
     private final HexWindowCache cache = new HexWindowCache();
-    private final ExecutorService loadExecutor = Executors.newSingleThreadExecutor();
 
     private final Object lock = new Object();
+    private ExecutorService loadExecutor = Executors.newSingleThreadExecutor();
 
     private HexSource source;
     private int sourceSize;
@@ -28,6 +29,7 @@ final class HexDataController {
     private int generation = 0;
     private int viewportRequestId = 0;
     private boolean multiWindowEnabled = true;
+    private boolean shutdown = false;
 
     HexDataController(Handler mainHandler, Callback callback, int bytesPerRow, int defaultWindowBytes) {
         this.mainHandler = mainHandler;
@@ -71,6 +73,7 @@ final class HexDataController {
 
     void setBytesPerRow(int bytesPerRow) {
         synchronized (lock) {
+            ensureExecutorLocked();
             this.bytesPerRow = Math.max(1, bytesPerRow);
             generation++;
             windowStart = windowEnd = -1;
@@ -81,6 +84,7 @@ final class HexDataController {
 
     void setSource(HexSource source) {
         synchronized (lock) {
+            ensureExecutorLocked();
             closeSourceLocked();
             this.source = source;
             this.sourceSize = source.size();
@@ -94,6 +98,7 @@ final class HexDataController {
 
     void clear() {
         synchronized (lock) {
+            ensureExecutorLocked();
             closeSourceLocked();
             source = null;
             sourceSize = 0;
@@ -157,10 +162,17 @@ final class HexDataController {
     }
 
     void shutdown() {
+        ExecutorService executorToShutdown;
         synchronized (lock) {
             closeSourceLocked();
+            generation++;
+            viewportRequestId++;
+            windowStart = windowEnd = -1;
+            cache.clear();
+            shutdown = true;
+            executorToShutdown = loadExecutor;
         }
-        loadExecutor.shutdownNow();
+        executorToShutdown.shutdownNow();
     }
 
     private void reload() {
@@ -192,31 +204,50 @@ final class HexDataController {
         }
         final int loadStart = start;
         final int loadEnd = end;
-        loadExecutor.execute(() -> {
-            HexRenderModel cached = cache.getCovering(loadStart, loadEnd);
-            HexRenderModel loadedModel;
-            if (cached != null) {
-                loadedModel = cached;
-            } else {
-                byte[] data = source.read(loadStart, loadEnd - loadStart);
-                if (data.length == 0 && loadStart < totalSize) {
-                    return;
-                }
-                loadedModel = HexRenderModel.from(loadStart, data, totalSize, requestBytesPerRow);
-                cache.put(loadedModel);
+        ExecutorService executor;
+        synchronized (lock) {
+            if (shutdown || generation != requestGeneration || requestId != viewportRequestId) {
+                return;
             }
-            HexRenderModel modelToPublish = loadedModel;
-            mainHandler.post(() -> {
-                synchronized (lock) {
-                    if (generation != requestGeneration || requestId != viewportRequestId) {
+            ensureExecutorLocked();
+            executor = loadExecutor;
+        }
+        try {
+            executor.execute(() -> {
+                HexRenderModel cached = cache.getCovering(loadStart, loadEnd);
+                HexRenderModel loadedModel;
+                if (cached != null) {
+                    loadedModel = cached;
+                } else {
+                    byte[] data = source.read(loadStart, loadEnd - loadStart);
+                    if (data.length == 0 && loadStart < totalSize) {
                         return;
                     }
-                    windowStart = modelToPublish.startOffset;
-                    windowEnd = modelToPublish.getWindowEndOffset();
+                    loadedModel = HexRenderModel.from(loadStart, data, totalSize, requestBytesPerRow);
+                    cache.put(loadedModel);
                 }
-                callback.onDataChanged(modelToPublish);
+                HexRenderModel modelToPublish = loadedModel;
+                mainHandler.post(() -> {
+                    synchronized (lock) {
+                        if (shutdown || generation != requestGeneration || requestId != viewportRequestId) {
+                            return;
+                        }
+                        windowStart = modelToPublish.startOffset;
+                        windowEnd = modelToPublish.getWindowEndOffset();
+                    }
+                    callback.onDataChanged(modelToPublish);
+                });
             });
-        });
+        } catch (RejectedExecutionException ignored) {
+        }
+    }
+
+    private void ensureExecutorLocked() {
+        if (!shutdown && !loadExecutor.isShutdown() && !loadExecutor.isTerminated()) {
+            return;
+        }
+        loadExecutor = Executors.newSingleThreadExecutor();
+        shutdown = false;
     }
 
     private void closeSourceLocked() {

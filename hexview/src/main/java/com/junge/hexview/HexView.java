@@ -64,7 +64,7 @@ public class HexView extends View implements HexDataController.Callback {
     private final RectF rect = new RectF();
     private final OverScroller scroller;
     private final GestureDetector gestureDetector;
-    private final VelocityTracker velocityTracker = VelocityTracker.obtain();
+    private VelocityTracker velocityTracker = VelocityTracker.obtain();
     private final int minimumVelocity;
     private final int maximumVelocity;
 
@@ -302,6 +302,7 @@ public class HexView extends View implements HexDataController.Callback {
         if (event.getActionMasked() == MotionEvent.ACTION_DOWN) {
             activateAsOnlyFocusedHexView();
         }
+        ensureVelocityTracker();
         velocityTracker.addMovement(event);
 
         if (draggingStartHandle || draggingEndHandle) {
@@ -388,8 +389,14 @@ public class HexView extends View implements HexDataController.Callback {
         }
         dismissCopyPopup();
         removeCallbacks(caretBlinkRunnable);
-        velocityTracker.recycle();
+        releaseVelocityTracker();
         dataController.shutdown();
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        ensureVelocityTracker();
     }
 
     private void activateAsOnlyFocusedHexView() {
@@ -420,6 +427,19 @@ public class HexView extends View implements HexDataController.Callback {
         removeCallbacks(caretBlinkRunnable);
         scroller.forceFinished(true);
         invalidate();
+    }
+
+    private void ensureVelocityTracker() {
+        if (velocityTracker == null) {
+            velocityTracker = VelocityTracker.obtain();
+        }
+    }
+
+    private void releaseVelocityTracker() {
+        if (velocityTracker != null) {
+            velocityTracker.recycle();
+            velocityTracker = null;
+        }
     }
 
     private static HexView getActiveHexView() {
