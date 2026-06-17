@@ -103,6 +103,7 @@ public class HexView extends View implements HexDataController.Callback {
     private boolean draggingEndHandle;
     private boolean draggingScroll;
     private boolean draggingScrollbar;
+    private int draggingHandleRowIndex = -1;
     private boolean caretVisible = true;
     private PopupWindow copyPopup;
     private HexSource pendingSource;
@@ -408,6 +409,9 @@ public class HexView extends View implements HexDataController.Callback {
                     getParent().requestDisallowInterceptTouchEvent(true);
                     draggingStartHandle = handleHit == HandleHit.START;
                     draggingEndHandle = handleHit == HandleHit.END;
+                    draggingHandleRowIndex = offsetToAbsoluteRowIndex(handleHit == HandleHit.START
+                            ? selectionController.getSelectionStart()
+                            : selectionController.getSelectionEnd());
                     removeCallbacks(caretBlinkRunnable);
                     return true;
                 }
@@ -439,6 +443,7 @@ public class HexView extends View implements HexDataController.Callback {
                 draggingEndHandle = false;
                 draggingScroll = false;
                 draggingScrollbar = false;
+                draggingHandleRowIndex = -1;
                 getParent().requestDisallowInterceptTouchEvent(false);
                 velocityTracker.clear();
                 return true;
@@ -502,6 +507,7 @@ public class HexView extends View implements HexDataController.Callback {
         draggingEndHandle = false;
         draggingScroll = false;
         draggingScrollbar = false;
+        draggingHandleRowIndex = -1;
         caretVisible = false;
         dismissCopyPopup();
         removeCallbacks(caretBlinkRunnable);
@@ -646,34 +652,39 @@ public class HexView extends View implements HexDataController.Callback {
         drawEndHandle(canvas, offsetToHandleScreenX(end, false), offsetToHandleScreenY(end));
     }
 
-    private void drawStartHandle(Canvas canvas, float cornerX, float cornerY) {
-        float radius = getHandleRadius();
-        float inset = getHandleInset();
-        canvas.drawCircle(cornerX + inset, cornerY - inset, radius, handlePaint);
+    private void drawStartHandle(Canvas canvas, float anchorX, float topY) {
+        drawSideHandle(canvas, anchorX, topY, true);
     }
 
-    private void drawEndHandle(Canvas canvas, float cornerX, float cornerY) {
+    private void drawEndHandle(Canvas canvas, float anchorX, float topY) {
+        drawSideHandle(canvas, anchorX, topY, false);
+    }
+
+    private void drawSideHandle(Canvas canvas, float anchorX, float topY, boolean startHandle) {
         float radius = getHandleRadius();
-        float inset = getHandleInset();
-        canvas.drawCircle(cornerX - inset, cornerY - inset, radius, handlePaint);
+        float centerX = startHandle ? anchorX - radius : anchorX + radius;
+        float centerY = topY + radius;
+        canvas.drawCircle(centerX, centerY, radius, handlePaint);
+        canvas.drawRect(
+                startHandle ? centerX : centerX - radius,
+                topY,
+                startHandle ? centerX + radius : centerX,
+                topY + radius,
+                handlePaint);
     }
 
     private float getHandleRadius() {
-        return dp(7);
-    }
-
-    private float getHandleInset() {
-        return getHandleRadius() * 0.45f;
+        return dp(11);
     }
 
     private float getHandleCenterX(long offset, boolean startHandle) {
-        float cornerX = offsetToHandleScreenX(offset, startHandle);
-        float inset = getHandleInset();
-        return startHandle ? cornerX + inset : cornerX - inset;
+        float anchorX = offsetToHandleScreenX(offset, startHandle);
+        float radius = getHandleRadius();
+        return startHandle ? anchorX - radius : anchorX + radius;
     }
 
     private float getHandleCenterY(long offset) {
-        return offsetToHandleScreenY(offset) - getHandleInset();
+        return offsetToHandleScreenY(offset) + getHandleRadius();
     }
 
     private void handleHandleDrag(MotionEvent event) {
@@ -684,7 +695,7 @@ public class HexView extends View implements HexDataController.Callback {
                 if (y < edge || y > getHeight() - edge) {
                     autoScrollHandleDrag(y);
                 }
-                long offset = hitTest(event.getX(), resolveHandleDragHitY(y, edge));
+                long offset = hitTestHandleDrag(event.getX(), y, edge);
                 if (offset >= 0) {
                     long maxOffset = getMaxOffset();
                     if (draggingStartHandle) {
@@ -692,6 +703,7 @@ public class HexView extends View implements HexDataController.Callback {
                     } else if (draggingEndHandle) {
                         selectionController.moveEndHandle(offset, maxOffset);
                     }
+                    draggingHandleRowIndex = offsetToAbsoluteRowIndex(offset);
                     ensureOffsetVisible(offset);
                     invalidate();
                 }
@@ -701,6 +713,7 @@ public class HexView extends View implements HexDataController.Callback {
                 HandleHit releasedHandle = draggingStartHandle ? HandleHit.START : HandleHit.END;
                 draggingStartHandle = false;
                 draggingEndHandle = false;
+                draggingHandleRowIndex = -1;
                 getParent().requestDisallowInterceptTouchEvent(false);
                 velocityTracker.clear();
                 if (selectionController.isHandlesVisible()) {
@@ -711,6 +724,21 @@ public class HexView extends View implements HexDataController.Callback {
             default:
                 break;
         }
+    }
+
+    private long hitTestHandleDrag(float x, float y, int edge) {
+        float resolvedY = resolveHandleDragHitY(y, edge);
+        if (draggingHandleRowIndex >= 0 && y >= edge && y <= getHeight() - edge) {
+            float rowTop = rowTopOnScreen(draggingHandleRowIndex);
+            float currentRowY = rowTop + rowHeight * 0.5f;
+            float handleBias = getHandleRadius();
+            float distanceFromRow = resolvedY - currentRowY - handleBias;
+            float rowSwitchThreshold = rowHeight * 0.55f;
+            if (Math.abs(distanceFromRow) < rowSwitchThreshold) {
+                resolvedY = currentRowY;
+            }
+        }
+        return hitTest(x, resolvedY);
     }
 
     private HandleHit hitTestHandle(float screenX, float screenY) {
