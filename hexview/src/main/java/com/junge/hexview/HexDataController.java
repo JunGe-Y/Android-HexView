@@ -17,7 +17,7 @@ final class HexDataController {
     private final Handler mainHandler;
     private final Callback callback;
     private static final String PERF_TAG = "HexViewPerf";
-    private static final long PERF_LOG_THRESHOLD_MS = 2L;
+    private static final long PERF_LOG_THRESHOLD_MS = 4L;
 
     private final int defaultWindowBytes;
     private final int prefetchWindowBytes;
