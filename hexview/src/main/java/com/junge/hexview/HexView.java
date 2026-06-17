@@ -735,7 +735,11 @@ public class HexView extends View implements HexDataController.Callback {
     }
 
     private long hitTestHandleDrag(float x, float y, int edge) {
-        return hitTest(x, resolveHandleDragHitY(y - handleDragTouchOffsetY, edge));
+        return hitTest(x, resolveHandleDragHitY(y - handleDragTouchOffsetY - getHandleDragRowBias(), edge));
+    }
+
+    private float getHandleDragRowBias() {
+        return Math.min(dp(2), rowHeight * 0.1f);
     }
 
     private HandleHit hitTestHandle(float screenX, float screenY) {
@@ -774,7 +778,7 @@ public class HexView extends View implements HexDataController.Callback {
 
     private float getHandleAnchorY(long offset) {
         int rowIndex = offsetToAbsoluteRowIndex(offset);
-        return rowTopOnScreen(rowIndex) + rowHeight * 0.5f;
+        return rowTopOnScreen(rowIndex) + rowHeight;
     }
 
     private float resolveHandleDragHitY(float y, int edge) {
