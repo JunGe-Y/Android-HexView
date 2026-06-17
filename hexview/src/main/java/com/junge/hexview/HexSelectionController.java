@@ -21,22 +21,36 @@ final class HexSelectionController {
         handlesVisible = true;
     }
 
-    void moveStartHandle(long offset, long maxOffset) {
+    boolean moveStartHandle(long offset, long maxOffset) {
         if (!handlesVisible) {
-            return;
+            return false;
         }
         long clamped = clamp(offset, 0, maxOffset);
-        selectionStart = Math.min(clamped, selectionEnd);
+        selectionStart = clamped;
+        boolean crossed = selectionStart > selectionEnd;
+        if (crossed) {
+            long tmp = selectionStart;
+            selectionStart = selectionEnd;
+            selectionEnd = tmp;
+        }
         cursorOffset = selectionStart;
+        return crossed;
     }
 
-    void moveEndHandle(long offset, long maxOffset) {
+    boolean moveEndHandle(long offset, long maxOffset) {
         if (!handlesVisible) {
-            return;
+            return false;
         }
         long clamped = clamp(offset, 0, maxOffset);
-        selectionEnd = Math.max(clamped, selectionStart);
+        selectionEnd = clamped;
+        boolean crossed = selectionEnd < selectionStart;
+        if (crossed) {
+            long tmp = selectionStart;
+            selectionStart = selectionEnd;
+            selectionEnd = tmp;
+        }
         cursorOffset = selectionEnd;
+        return crossed;
     }
 
     boolean hasSelection() {

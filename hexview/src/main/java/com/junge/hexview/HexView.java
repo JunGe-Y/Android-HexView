@@ -103,7 +103,7 @@ public class HexView extends View implements HexDataController.Callback {
     private boolean draggingEndHandle;
     private boolean draggingScroll;
     private boolean draggingScrollbar;
-    private int draggingHandleRowIndex = -1;
+    private float handleDragTouchOffsetY;
     private boolean caretVisible = true;
     private PopupWindow copyPopup;
     private HexSource pendingSource;
@@ -409,9 +409,10 @@ public class HexView extends View implements HexDataController.Callback {
                     getParent().requestDisallowInterceptTouchEvent(true);
                     draggingStartHandle = handleHit == HandleHit.START;
                     draggingEndHandle = handleHit == HandleHit.END;
-                    draggingHandleRowIndex = offsetToAbsoluteRowIndex(handleHit == HandleHit.START
+                    long draggedOffset = handleHit == HandleHit.START
                             ? selectionController.getSelectionStart()
-                            : selectionController.getSelectionEnd());
+                            : selectionController.getSelectionEnd();
+                    handleDragTouchOffsetY = event.getY() - getHandleAnchorY(draggedOffset);
                     removeCallbacks(caretBlinkRunnable);
                     return true;
                 }
@@ -443,7 +444,7 @@ public class HexView extends View implements HexDataController.Callback {
                 draggingEndHandle = false;
                 draggingScroll = false;
                 draggingScrollbar = false;
-                draggingHandleRowIndex = -1;
+                handleDragTouchOffsetY = 0f;
                 getParent().requestDisallowInterceptTouchEvent(false);
                 velocityTracker.clear();
                 return true;
@@ -507,7 +508,7 @@ public class HexView extends View implements HexDataController.Callback {
         draggingEndHandle = false;
         draggingScroll = false;
         draggingScrollbar = false;
-        draggingHandleRowIndex = -1;
+        handleDragTouchOffsetY = 0f;
         caretVisible = false;
         dismissCopyPopup();
         removeCallbacks(caretBlinkRunnable);
@@ -699,11 +700,18 @@ public class HexView extends View implements HexDataController.Callback {
                 if (offset >= 0) {
                     long maxOffset = getMaxOffset();
                     if (draggingStartHandle) {
-                        selectionController.moveStartHandle(offset, maxOffset);
+                        boolean crossed = selectionController.moveStartHandle(offset, maxOffset);
+                        if (crossed) {
+                            draggingStartHandle = false;
+                            draggingEndHandle = true;
+                        }
                     } else if (draggingEndHandle) {
-                        selectionController.moveEndHandle(offset, maxOffset);
+                        boolean crossed = selectionController.moveEndHandle(offset, maxOffset);
+                        if (crossed) {
+                            draggingStartHandle = true;
+                            draggingEndHandle = false;
+                        }
                     }
-                    draggingHandleRowIndex = offsetToAbsoluteRowIndex(offset);
                     ensureOffsetVisible(offset);
                     invalidate();
                 }
@@ -713,7 +721,7 @@ public class HexView extends View implements HexDataController.Callback {
                 HandleHit releasedHandle = draggingStartHandle ? HandleHit.START : HandleHit.END;
                 draggingStartHandle = false;
                 draggingEndHandle = false;
-                draggingHandleRowIndex = -1;
+                handleDragTouchOffsetY = 0f;
                 getParent().requestDisallowInterceptTouchEvent(false);
                 velocityTracker.clear();
                 if (selectionController.isHandlesVisible()) {
@@ -727,18 +735,7 @@ public class HexView extends View implements HexDataController.Callback {
     }
 
     private long hitTestHandleDrag(float x, float y, int edge) {
-        float resolvedY = resolveHandleDragHitY(y, edge);
-        if (draggingHandleRowIndex >= 0 && y >= edge && y <= getHeight() - edge) {
-            float rowTop = rowTopOnScreen(draggingHandleRowIndex);
-            float currentRowY = rowTop + rowHeight * 0.5f;
-            float handleBias = getHandleRadius();
-            float distanceFromRow = resolvedY - currentRowY - handleBias;
-            float rowSwitchThreshold = rowHeight * 0.55f;
-            if (Math.abs(distanceFromRow) < rowSwitchThreshold) {
-                resolvedY = currentRowY;
-            }
-        }
-        return hitTest(x, resolvedY);
+        return hitTest(x, resolveHandleDragHitY(y - handleDragTouchOffsetY, edge));
     }
 
     private HandleHit hitTestHandle(float screenX, float screenY) {
@@ -772,8 +769,12 @@ public class HexView extends View implements HexDataController.Callback {
     }
 
     private float offsetToHandleScreenY(long offset) {
+        return getHandleAnchorY(offset);
+    }
+
+    private float getHandleAnchorY(long offset) {
         int rowIndex = offsetToAbsoluteRowIndex(offset);
-        return rowTopOnScreen(rowIndex) + rowHeight;
+        return rowTopOnScreen(rowIndex) + rowHeight * 0.5f;
     }
 
     private float resolveHandleDragHitY(float y, int edge) {
